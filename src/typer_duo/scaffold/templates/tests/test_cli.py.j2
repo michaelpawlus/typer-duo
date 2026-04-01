@@ -1,0 +1,22 @@
+"""Tests for {{ project_name }} CLI."""
+
+import json
+
+from typer.testing import CliRunner
+
+from {{ module_name }}.cli import app
+
+runner = CliRunner()
+
+
+def test_hello_human():
+    result = runner.invoke(app, ["--name", "Alice"])
+    assert result.exit_code == 0
+    assert "Hello, Alice!" in result.output
+
+
+def test_hello_json():
+    result = runner.invoke(app, ["--name", "Alice", "--json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["message"] == "Hello, Alice!"

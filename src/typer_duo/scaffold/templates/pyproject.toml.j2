@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "{{ project_name }}"
+version = "0.1.0"
+description = "{{ description }}"
+requires-python = ">=3.10"
+license = "MIT"
+{% if author %}authors = [{name = "{{ author }}"}]
+{% endif %}dependencies = [
+    "typer>=0.9.0",
+    "typer-duo>=0.1.0",
+]
+
+[project.scripts]
+{{ project_name }} = "{{ module_name }}.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

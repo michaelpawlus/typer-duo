@@ -1,0 +1,15 @@
+"""CLI entry point for {{ project_name }}."""
+
+from typer_duo import DuoApp
+
+app = DuoApp(name="{{ project_name }}")
+
+
+@app.command()
+def hello(name: str = "world"):
+    """Say hello."""
+    return {"message": f"Hello, {name}!"}
+
+
+if __name__ == "__main__":
+    app()
