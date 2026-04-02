@@ -19,6 +19,10 @@ The `typer-duo` CLI scaffolds new projects pre-wired with dual-output patterns.
 ## Public API
 
 - `DuoApp` — Typer subclass that adds `--json` to every command
+  - `DuoApp.add_typer(child, ..., duo=True)` — mounts a sub-app; plain `typer.Typer` children are auto-wrapped with `--json` support. Pass `duo=False` to skip wrapping.
+  - `DuoApp.command(..., duo=True)` — registers a command; pass `duo=False` to skip dual-output wrapping for that command.
+  - Sub-apps that are themselves `DuoApp` instances work natively (no patching needed).
+  - Nested sub-apps (grandchild apps) are recursively wrapped.
 - `@duo_command` — decorator for individual commands on a standard Typer app
 - `DuoError` — structured error (renders as JSON or human text)
 - `is_json_mode()`, `is_interactive()`, `duo_print()` — context utilities
