@@ -5,6 +5,7 @@ from .constants import EXIT_ERROR, EXIT_NOT_FOUND, EXIT_OK
 from .context import duo_print, is_interactive, is_json_mode
 from .decorators import duo_command
 from .errors import DuoError
+from .types import JsonFlag
 
 __all__ = [
     "DuoApp",
@@ -12,6 +13,7 @@ __all__ = [
     "EXIT_ERROR",
     "EXIT_NOT_FOUND",
     "EXIT_OK",
+    "JsonFlag",
     "duo_command",
     "duo_print",
     "is_interactive",

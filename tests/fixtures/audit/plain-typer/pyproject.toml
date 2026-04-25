@@ -1,0 +1,10 @@
+[project]
+name = "plain-typer-fixture"
+version = "0.0.1"
+requires-python = ">=3.10"
+
+[project.scripts]
+plain-typer = "plain_typer.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]

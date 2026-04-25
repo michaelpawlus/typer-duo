@@ -12,9 +12,24 @@ Agent-ready dual-output library for Typer CLIs: JSON to stdout, human text to st
 
 ```
 typer-duo init PROJECT_NAME [--description TEXT] [--author TEXT] [--no-tests] [-o DIR]
+typer-duo audit PATH [--json] [--strict] [--fix-dry-run] [--include GLOB]... [--exclude GLOB]...
 ```
 
-The `typer-duo` CLI scaffolds new projects pre-wired with dual-output patterns.
+- `init` — scaffolds new projects pre-wired with dual-output patterns.
+- `audit` — points at an existing Typer-based project and reports which commands
+  are not agent-ready (missing `--json`, bare `print()` to stdout, plain
+  `typer.Typer` instead of `DuoApp`, etc.). Pure static analysis on the AST —
+  it never imports or executes the target. Safe to run against any repo.
+
+### `audit` exit codes
+- `0` — audit ran successfully (regardless of findings).
+- `1` — audit itself errored, OR `--strict` was set and a finding has severity
+  `error`.
+- `2` — no Typer entry point detected at the target path.
+
+### `audit` pairing with `conductor doctor`
+`conductor doctor --check-subcommands` flags repos that fail the agent-compat
+check. `typer-duo audit PATH` says exactly what to change in each one.
 
 ## Public API
 
@@ -24,9 +39,11 @@ The `typer-duo` CLI scaffolds new projects pre-wired with dual-output patterns.
   - Sub-apps that are themselves `DuoApp` instances work natively (no patching needed).
   - Nested sub-apps (grandchild apps) are recursively wrapped.
 - `@duo_command` — decorator for individual commands on a standard Typer app
+- `JsonFlag` — `Annotated[bool, typer.Option("--json")]` alias for hand-written commands
 - `DuoError` — structured error (renders as JSON or human text)
 - `is_json_mode()`, `is_interactive()`, `duo_print()` — context utilities
 - `EXIT_OK`, `EXIT_ERROR`, `EXIT_NOT_FOUND` — exit code constants
+- `typer_duo.audit.audit_project(path, ...)` — programmatic API for the audit
 
 ## Running Tests
 

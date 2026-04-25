@@ -7,13 +7,15 @@ from typing import Optional
 
 import typer
 
+from ..app import DuoApp
+
 try:
     from jinja2 import Environment, FileSystemLoader
 except ImportError:
     Environment = None  # type: ignore[assignment, misc]
     FileSystemLoader = None  # type: ignore[assignment, misc]
 
-app = typer.Typer(name="typer-duo", help="Scaffold new typer-duo CLI projects.")
+app = DuoApp(name="typer-duo", help="Scaffold new typer-duo CLI projects.")
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
@@ -23,7 +25,7 @@ def _render_template(env: Environment, template_name: str, context: dict) -> str
     return template.render(**context)
 
 
-@app.command()
+@app.command(duo=False)
 def init(
     project_name: str = typer.Argument(help="Name of the new CLI project"),
     description: Optional[str] = typer.Option(
