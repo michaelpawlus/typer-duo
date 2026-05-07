@@ -1,7 +1,8 @@
-"""Top-level ``typer-duo`` CLI: ``init`` (scaffold) + ``audit``."""
+"""Top-level ``typer-duo`` CLI: ``init`` (scaffold) + ``audit`` + ``audit-all``."""
 
 from __future__ import annotations
 
+import concurrent.futures
 import json as _json
 import sys
 from pathlib import Path
@@ -13,7 +14,15 @@ from .app import DuoApp
 from .audit import audit_project
 from .audit.models import severity_rank
 from .constants import EXIT_ERROR, EXIT_NOT_FOUND, EXIT_OK
+from .discovery import ProjectPath, iter_projects
 from .scaffold import init as _scaffold_init
+from .scorecard import (
+    Scorecard,
+    build_scorecard,
+    compute_diff,
+    no_cli_score,
+    score_from_report,
+)
 
 app = DuoApp(
     name="typer-duo",
@@ -141,6 +150,193 @@ def _render_human(report) -> None:  # noqa: ANN001 (report is AuditReport)
     if report.diff_preview:
         print("--- diff preview ---", file=sys.stderr)
         print(report.diff_preview, file=sys.stderr)
+
+
+@app.command(name="audit-all", duo=False)
+def audit_all(
+    root: Annotated[
+        Path,
+        typer.Option(
+            "--root",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+            help="Root directory to walk (default: ~/projects).",
+        ),
+    ] = Path("~/projects").expanduser(),
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit JSON scorecard to stdout."),
+    ] = False,
+    include: Annotated[
+        Optional[list[str]],
+        typer.Option(
+            "--include",
+            help="Glob of project dir names to include (repeatable).",
+        ),
+    ] = None,
+    exclude: Annotated[
+        Optional[list[str]],
+        typer.Option(
+            "--exclude",
+            help="Glob of project dir names to exclude (repeatable).",
+        ),
+    ] = None,
+    since: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--since",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            help="Compare against a previous scorecard JSON file.",
+        ),
+    ] = None,
+    output: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--output",
+            help="Write scorecard JSON to this file (also stdout if --json).",
+        ),
+    ] = None,
+    fail_under: Annotated[
+        Optional[float],
+        typer.Option(
+            "--fail-under",
+            help="Exit non-zero if portfolio_score is below this threshold (0..1).",
+        ),
+    ] = None,
+    skip_no_cli: Annotated[
+        bool,
+        typer.Option(
+            "--skip-no-cli",
+            help="Skip projects with no CLI entry point in the scorecard.",
+        ),
+    ] = False,
+    workers: Annotated[
+        int,
+        typer.Option(
+            "--workers",
+            min=1,
+            max=32,
+            help="Parallel worker count for per-project audits.",
+        ),
+    ] = 4,
+) -> None:
+    """Run the per-project audit across every project under ``--root``.
+
+    Produces an aggregated scorecard suitable for diffing over time and for
+    feeding into ``conductor doctor`` and ``code-daily portfolio sweep``.
+    """
+    discovered = list(iter_projects(root, include=include, exclude=exclude))
+
+    project_scores = _audit_in_parallel(
+        discovered, skip_no_cli=skip_no_cli, max_workers=workers
+    )
+
+    diff = None
+    if since is not None:
+        try:
+            baseline = _json.loads(since.read_text(encoding="utf-8"))
+        except (OSError, _json.JSONDecodeError) as exc:
+            payload = {"error": f"could not read --since file: {exc}", "code": EXIT_ERROR}
+            if json_output:
+                _json.dump(payload, sys.stdout)
+                sys.stdout.write("\n")
+            else:
+                print(f"Error: {payload['error']}", file=sys.stderr)
+            raise typer.Exit(EXIT_ERROR)
+
+    scorecard = build_scorecard(root=str(root), projects=project_scores)
+    if since is not None:
+        scorecard.diff = compute_diff(scorecard.to_dict(), baseline)
+
+    payload = scorecard.to_dict()
+
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(_json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    if json_output:
+        _json.dump(payload, sys.stdout)
+        sys.stdout.write("\n")
+    else:
+        _render_audit_all_human(scorecard)
+
+    if fail_under is not None:
+        if scorecard.portfolio_score is None or scorecard.portfolio_score < fail_under:
+            raise typer.Exit(EXIT_ERROR)
+    raise typer.Exit(EXIT_OK)
+
+
+def _audit_one(project: ProjectPath, *, skip_no_cli: bool):
+    """Audit a single discovered project. Returns a ProjectScore or None."""
+    if not project.has_scripts:
+        if skip_no_cli:
+            return None
+        return no_cli_score(project.name, str(project.path))
+    report = audit_project(project_root=project.path)
+    return score_from_report(project.name, str(project.path), report)
+
+
+def _audit_in_parallel(
+    projects: list[ProjectPath], *, skip_no_cli: bool, max_workers: int
+) -> list:
+    """Run per-project audits concurrently, preserving discovery order."""
+    if not projects:
+        return []
+    results: list = [None] * len(projects)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {
+            ex.submit(_audit_one, p, skip_no_cli=skip_no_cli): i
+            for i, p in enumerate(projects)
+        }
+        for fut in concurrent.futures.as_completed(futures):
+            i = futures[fut]
+            results[i] = fut.result()
+    return [r for r in results if r is not None]
+
+
+def _render_audit_all_human(scorecard: Scorecard) -> None:
+    """Write a concise human summary of the scorecard to stderr."""
+    s = scorecard.summary
+    print(f"Portfolio root: {scorecard.root}", file=sys.stderr)
+    print(
+        f"  projects: {s.total_projects}  "
+        f"with-cli: {s.with_cli}  no-cli: {s.no_cli}",
+        file=sys.stderr,
+    )
+    score = scorecard.portfolio_score
+    score_str = f"{score:.2f}" if score is not None else "n/a"
+    print(
+        f"  passing: {s.passing}  warning: {s.warning}  "
+        f"failing: {s.failing}  portfolio_score: {score_str}",
+        file=sys.stderr,
+    )
+
+    # Group failing/warning projects first so attention goes there.
+    order = {"fail": 0, "warn": 1, "non-typer": 2, "ok": 3, "no-cli": 4}
+    sorted_projects = sorted(
+        scorecard.projects, key=lambda p: (order.get(p.status, 9), p.name)
+    )
+    for p in sorted_projects:
+        score_repr = f"{p.score:.2f}" if p.score is not None else "  --"
+        line = f"  [{p.status:<9}] {score_repr}  {p.name}"
+        print(line, file=sys.stderr)
+        if p.commands_failing:
+            print(
+                f"      failing: {', '.join(p.commands_failing)}",
+                file=sys.stderr,
+            )
+
+    if scorecard.diff is not None:
+        d = scorecard.diff
+        print(f"  diff vs {d.get('vs_baseline')}:", file=sys.stderr)
+        for key in ("improved", "regressed", "newly_added", "removed"):
+            vals = d.get(key) or []
+            if vals:
+                print(f"    {key}: {', '.join(vals)}", file=sys.stderr)
 
 
 if __name__ == "__main__":  # pragma: no cover

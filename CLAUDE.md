@@ -13,6 +13,9 @@ Agent-ready dual-output library for Typer CLIs: JSON to stdout, human text to st
 ```
 typer-duo init PROJECT_NAME [--description TEXT] [--author TEXT] [--no-tests] [-o DIR]
 typer-duo audit PATH [--json] [--strict] [--fix-dry-run] [--include GLOB]... [--exclude GLOB]...
+typer-duo audit-all [--root PATH] [--json] [--include GLOB]... [--exclude GLOB]...
+                    [--since FILE] [--output PATH] [--fail-under FLOAT]
+                    [--skip-no-cli] [--workers N]
 ```
 
 - `init` — scaffolds new projects pre-wired with dual-output patterns.
@@ -20,6 +23,11 @@ typer-duo audit PATH [--json] [--strict] [--fix-dry-run] [--include GLOB]... [--
   are not agent-ready (missing `--json`, bare `print()` to stdout, plain
   `typer.Typer` instead of `DuoApp`, etc.). Pure static analysis on the AST —
   it never imports or executes the target. Safe to run against any repo.
+- `audit-all` — depth-first audit across every project under `--root` (default
+  `~/projects`), aggregated into a single JSON scorecard. Reuses the same
+  AST audit per project (no subprocess), parallelized with a thread pool.
+  Pair with `--since FILE` to diff against a previous scorecard so the
+  artifact becomes diffable over time.
 
 ### `audit` exit codes
 - `0` — audit ran successfully (regardless of findings).
@@ -27,9 +35,58 @@ typer-duo audit PATH [--json] [--strict] [--fix-dry-run] [--include GLOB]... [--
   `error`.
 - `2` — no Typer entry point detected at the target path.
 
-### `audit` pairing with `conductor doctor`
+### `audit-all` exit codes
+- `0` — scorecard generated successfully.
+- `1` — `--fail-under` threshold not met, or `--since` file unreadable.
+
+### `audit-all` discovery rules
+A directory under `--root` is included iff it contains a `pyproject.toml`.
+Hidden directories (`.git`, `.venv`, …) are skipped. Projects with no
+`[project.scripts]` table are reported as `status: "no-cli"` unless
+`--skip-no-cli` is passed.
+
+### `audit-all` scorecard schema (v1)
+```json
+{
+  "schema_version": 1,
+  "generated_at": "<ISO-8601 UTC>",
+  "root": "<root path>",
+  "portfolio_score": 0.0,
+  "projects": [
+    {
+      "name": "...",
+      "path": "...",
+      "status": "ok | warn | fail | no-cli | non-typer",
+      "score": 0.0,
+      "checks": {
+        "json_flag_parity": "pass | warn | fail",
+        "error_shape": "pass | warn | fail",
+        "duo_registered": "pass | warn | fail",
+        "exit_codes": "pass | warn | fail"
+      },
+      "commands_audited": 0,
+      "commands_failing": []
+    }
+  ],
+  "summary": {
+    "total_projects": 0, "with_cli": 0, "passing": 0,
+    "warning": 0, "failing": 0, "no_cli": 0
+  },
+  "diff": {
+    "vs_baseline": "<ISO-8601 UTC>",
+    "improved": [], "regressed": [], "newly_added": [], "removed": []
+  }
+}
+```
+`diff` is only present when `--since FILE` is supplied. `score` is `null`
+for `no-cli` and `non-typer` entries; those are excluded from
+`portfolio_score` (a simple mean of scorable projects).
+
+### `audit` / `audit-all` pairing with `conductor doctor`
 `conductor doctor --check-subcommands` flags repos that fail the agent-compat
 check. `typer-duo audit PATH` says exactly what to change in each one.
+`typer-duo audit-all --json` produces the portfolio-wide scorecard that
+`conductor doctor --report` and `code-daily portfolio sweep` can both ingest.
 
 ## Public API
 
@@ -43,7 +100,9 @@ check. `typer-duo audit PATH` says exactly what to change in each one.
 - `DuoError` — structured error (renders as JSON or human text)
 - `is_json_mode()`, `is_interactive()`, `duo_print()` — context utilities
 - `EXIT_OK`, `EXIT_ERROR`, `EXIT_NOT_FOUND` — exit code constants
-- `typer_duo.audit.audit_project(path, ...)` — programmatic API for the audit
+- `typer_duo.audit.audit_project(path, ...)` — programmatic API for the per-project audit
+- `typer_duo.discovery.iter_projects(root, ...)` — yields `ProjectPath` records for portfolio walks
+- `typer_duo.scorecard.{Scorecard, ProjectScore, build_scorecard, score_from_report, compute_diff}` — programmatic API for the portfolio scorecard
 
 ## Running Tests
 
