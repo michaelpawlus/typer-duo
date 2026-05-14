@@ -15,6 +15,8 @@ from .audit import audit_project
 from .audit.models import severity_rank
 from .constants import EXIT_ERROR, EXIT_NOT_FOUND, EXIT_OK
 from .discovery import ProjectPath, iter_projects
+from .fixers import DEFAULT_FIXERS, FIXERS, OPT_IN_FIXERS, FixResult
+from .fixers.base import apply_edit, render_diff
 from .scaffold import init as _scaffold_init
 from .scorecard import (
     Scorecard,
@@ -337,6 +339,195 @@ def _render_audit_all_human(scorecard: Scorecard) -> None:
             vals = d.get(key) or []
             if vals:
                 print(f"    {key}: {', '.join(vals)}", file=sys.stderr)
+
+
+@app.command(name="fix", duo=False)
+def fix(
+    path: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+            help="Directory of the Typer-based project to fix.",
+        ),
+    ],
+    check: Annotated[
+        Optional[list[str]],
+        typer.Option(
+            "--check",
+            help=(
+                "Run only the given fixer(s). Repeatable. "
+                f"Available: {', '.join(sorted(FIXERS))}. "
+                f"Opt-in only: {', '.join(OPT_IN_FIXERS)}."
+            ),
+        ),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Print unified diffs to stdout instead of writing changes.",
+        ),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help="Emit a structured JSON report to stdout.",
+        ),
+    ] = False,
+) -> None:
+    """Apply standard remediations for findings surfaced by ``audit``.
+
+    Closes the audit loop: every check ``audit`` reports has a corresponding
+    fix template. By default the safe fixers (``add-json-flag``,
+    ``replace-print-with-stderr``, ``add-project-script-entry``) run.
+    ``migrate-to-duoapp`` must be opted into explicitly with
+    ``--check migrate-to-duoapp`` because it rewrites the entry point.
+    """
+    selected_ids, unknown = _select_fixers(check)
+    if unknown:
+        payload = {
+            "error": f"unknown --check id(s): {', '.join(sorted(unknown))}",
+            "code": EXIT_ERROR,
+        }
+        if json_output:
+            _json.dump(payload, sys.stdout)
+            sys.stdout.write("\n")
+        else:
+            print(f"Error: {payload['error']}", file=sys.stderr)
+        raise typer.Exit(EXIT_ERROR)
+
+    report = audit_project(project_root=path)
+    if report.entry_point.framework == "unknown":
+        # Allow ``add-project-script-entry`` to attempt anyway? No: it relies
+        # on entry_point metadata, so without it there's nothing to wire.
+        payload = {
+            "error": "no Typer entry point detected",
+            "code": EXIT_NOT_FOUND,
+        }
+        if json_output:
+            _json.dump(payload, sys.stdout)
+            sys.stdout.write("\n")
+        else:
+            print(f"Error: {payload['error']} (path: {path})", file=sys.stderr)
+        raise typer.Exit(EXIT_NOT_FOUND)
+
+    # Sequence fixers: in apply mode, write each fixer's edits before the
+    # next fixer proposes, so the second fixer sees the updated source on
+    # disk. In dry-run mode, propose against the original disk state and
+    # leave it untouched.
+    results: list[FixResult] = []
+    applied: list[FixResult] = []
+    for fixer_id in selected_ids:
+        propose_fn = FIXERS[fixer_id]
+        try:
+            result = propose_fn(path, report)
+        except Exception as exc:  # noqa: BLE001 (surfaced via JSON)
+            result = FixResult(
+                fixer_id=fixer_id,
+                status="error",
+                reason=f"{type(exc).__name__}: {exc}",
+            )
+
+        if result.status == "proposed" and result.has_changes:
+            if dry_run:
+                applied.append(result)
+            else:
+                try:
+                    for edit in result.edits:
+                        if edit.is_noop:
+                            continue
+                        apply_edit(path, edit)
+                    result.status = "applied"
+                    applied.append(result)
+                except OSError as exc:
+                    result.status = "error"
+                    result.reason = f"write failed: {exc}"
+
+        results.append(result)
+
+    payload = _build_fix_payload(results, applied=applied, dry_run=dry_run)
+
+    if json_output:
+        _json.dump(payload, sys.stdout, default=str)
+        sys.stdout.write("\n")
+    else:
+        _render_fix_human(results, dry_run=dry_run)
+
+    if any(r.status == "error" for r in results):
+        raise typer.Exit(EXIT_ERROR)
+    raise typer.Exit(EXIT_OK)
+
+
+def _select_fixers(check: list[str] | None) -> tuple[list[str], set[str]]:
+    """Resolve --check input into a concrete ordered list of fixer IDs."""
+    if check:
+        unknown = {c for c in check if c not in FIXERS}
+        # Preserve user-specified order, dedupe.
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for c in check:
+            if c in FIXERS and c not in seen:
+                ordered.append(c)
+                seen.add(c)
+        return ordered, unknown
+    return list(DEFAULT_FIXERS), set()
+
+
+def _build_fix_payload(
+    results: list[FixResult],
+    *,
+    applied: list[FixResult],
+    dry_run: bool,
+) -> dict:
+    applied_ids = {r.fixer_id for r in applied}
+
+    out_applied: list[dict] = []
+    out_skipped: list[dict] = []
+    out_errors: list[dict] = []
+    for r in results:
+        entry = r.to_dict()
+        if dry_run and r.status == "proposed" and r.has_changes:
+            entry["diff"] = "\n".join(render_diff(e) for e in r.edits if not e.is_noop)
+            out_applied.append(entry)
+        elif r.fixer_id in applied_ids and r.status == "applied":
+            out_applied.append(entry)
+        elif r.status == "error":
+            out_errors.append(entry)
+        else:
+            out_skipped.append(entry)
+
+    return {
+        "dry_run": dry_run,
+        "applied": out_applied,
+        "skipped": out_skipped,
+        "errors": out_errors,
+    }
+
+
+def _render_fix_human(results: list[FixResult], *, dry_run: bool) -> None:
+    label = "Would apply" if dry_run else "Applied"
+    print(f"Fix run ({'dry-run' if dry_run else 'apply'}):", file=sys.stderr)
+    for r in results:
+        if r.status == "proposed" and r.has_changes and dry_run:
+            print(f"  {label}: {r.fixer_id} ({len(r.edits)} file(s))", file=sys.stderr)
+            for edit in r.edits:
+                if edit.is_noop:
+                    continue
+                diff = render_diff(edit)
+                if diff:
+                    print(diff, file=sys.stdout)
+        elif r.status == "applied":
+            print(f"  {label}: {r.fixer_id} ({len(r.edits)} file(s))", file=sys.stderr)
+        elif r.status == "no-op":
+            print(f"  no-op:  {r.fixer_id} -- {r.reason or 'nothing to do'}", file=sys.stderr)
+        elif r.status == "skipped":
+            print(f"  skip:   {r.fixer_id} -- {r.reason or 'skipped'}", file=sys.stderr)
+        elif r.status == "error":
+            print(f"  error:  {r.fixer_id} -- {r.reason or 'unknown'}", file=sys.stderr)
 
 
 if __name__ == "__main__":  # pragma: no cover

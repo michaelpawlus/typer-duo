@@ -262,12 +262,71 @@ def status():
     return get_status()
 ```
 
+## Closing the Audit Loop: `audit` + `fix`
+
+`typer-duo audit` tells you *what* in a project isn't agent-ready. `typer-duo
+fix` applies the standard remediation for each finding.
+
+```bash
+# 1. See what's wrong.
+typer-duo audit path/to/repo --json
+
+# 2. Preview the patches before writing.
+typer-duo fix path/to/repo --dry-run
+
+# 3. Apply the safe fixers.
+typer-duo fix path/to/repo
+
+# 4. JSON report for agents/CI.
+typer-duo fix path/to/repo --dry-run --json
+```
+
+Output (`--json`):
+
+```json
+{
+  "dry_run": true,
+  "applied": [{"fixer_id": "add-json-flag", "diff": "...", "edits": [...]}],
+  "skipped": [{"fixer_id": "add-project-script-entry", "status": "no-op", ...}],
+  "errors": []
+}
+```
+
+### Available fixers
+
+| Fixer ID | Addresses | Default? | What it does |
+| --- | --- | --- | --- |
+| `add-json-flag` | `missing-json-flag` | yes | Adds `json_output: JsonFlag = False` to every command lacking `--json` and inserts the `from typer_duo import …` line. |
+| `replace-print-with-stderr` | `bare-print-stdout` | yes | Rewrites bare `print(...)` calls inside command bodies to `print(..., file=sys.stderr)` (and inserts `import sys` if needed). |
+| `add-project-script-entry` | – | yes | Adds a `[project.scripts]` entry in `pyproject.toml` pointing at the detected Typer/DuoApp module. No-op when one already exists. |
+| `migrate-to-duoapp` | `app-uses-plain-typer` | **opt-in** | Rewrites `app = typer.Typer(...)` to `app = DuoApp(...)`. Gated behind `--check migrate-to-duoapp` because it changes the runtime behaviour of every command in the entry point. |
+
+### Properties
+
+* **Idempotent.** A second `fix` run produces zero new changes.
+* **Drift-free vs. audit.** Both `audit --fix-dry-run` and `fix` reuse the
+  same AST utilities, so a finding and its fix never disagree.
+* **Pure-AST proposals.** Each fixer reads the source on disk, never imports
+  or executes the target.
+
+### Exit codes
+
+* `0` — fix ran successfully (including the no-op case).
+* `1` — unknown `--check` ID, a fixer raised, or a write failed.
+* `2` — no Typer entry point detected at the target path.
+
 ## Design Principles
 
 1. **Zero magic.** Explicit decorators, not monkey-patching.
 2. **Minimal surface.** The smallest useful API.
 3. **Typer-native.** Extends Typer's conventions, doesn't fight them.
 4. **Agent-friendly by default.** JSON to stdout, human text to stderr, structured errors, meaningful exit codes.
+
+## Adopters
+
+CLIs in the wild that use typer-duo. Open a PR to add yours.
+
+- **[agent-cron](https://github.com/michaelpawlus/agent-cron)** — Scheduled headless Claude Code workflows. First reference adopter; canonical example of a multi-command `DuoApp` migration from plain Typer.
 
 ## Development
 
